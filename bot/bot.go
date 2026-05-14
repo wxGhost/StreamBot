@@ -10,8 +10,8 @@ import (
 	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"streamer-bot/internal/db"
-	"streamer-bot/internal/models"
+	"streamer-bot/db"
+	"streamer-bot/models"
 )
 
 const (

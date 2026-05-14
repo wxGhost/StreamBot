@@ -14,8 +14,8 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"golang.org/x/time/rate"
 
-	"streamer-bot/internal/bot"
-	"streamer-bot/internal/db"
+	"streamer-bot/bot"
+	"streamer-bot/db"
 )
 
 // ─── Singleton init (reused across warm invocations on Vercel) ────────────────

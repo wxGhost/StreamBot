@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"streamer-bot/internal/models"
+	"streamer-bot/models"
 )
 
 type DB struct {
