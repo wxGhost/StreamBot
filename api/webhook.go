@@ -18,12 +18,11 @@ import (
 	"streamer-bot/db"
 )
 
-// ─── Singleton init (reused across warm invocations on Vercel) ────────────────
+// ─── Singleton ────────────────────────────────────────────────────────────────
 
 var (
 	initOnce  sync.Once
 	globalBot *bot.Bot
-	globalDB  *db.DB
 	initErr   error
 )
 
@@ -39,21 +38,23 @@ func initialize() {
 
 		database, err := db.New(ctx, dsn)
 		if err != nil {
+			log.Printf("ERROR db.New: %v", err)
 			initErr = err
 			return
 		}
-		globalDB = database
 
 		b, err := bot.New(token, database, streamerID, channelID)
 		if err != nil {
+			log.Printf("ERROR bot.New: %v", err)
 			initErr = err
 			return
 		}
 		globalBot = b
+		log.Printf("INFO bot initialized ok")
 	})
 }
 
-// ─── Rate limiter (per IP) ────────────────────────────────────────────────────
+// ─── Rate limiter ─────────────────────────────────────────────────────────────
 
 var (
 	limiters   = make(map[string]*rate.Limiter)
@@ -66,38 +67,46 @@ func getLimiter(ip string) *rate.Limiter {
 	if l, ok := limiters[ip]; ok {
 		return l
 	}
-	// 10 burst, refills at 1 token per 2s (~30/min sustained)
 	l := rate.NewLimiter(rate.Every(2*time.Second), 10)
 	limiters[ip] = l
 	return l
 }
 
-// ─── Vercel entry point ───────────────────────────────────────────────────────
+// ─── Handler ──────────────────────────────────────────────────────────────────
 
-// Handler is called by Vercel for every incoming HTTP request to /api/webhook.
 func Handler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("INFO request: method=%s path=%s", r.Method, r.URL.Path)
+
 	initialize()
 	if initErr != nil {
-		log.Printf("FATAL init error: %v", initErr)
+		log.Printf("ERROR init failed: %v", initErr)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Only accept POST (Telegram only sends POST)
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	// Accept both POST (Telegram) and GET (health check / webhook verify)
+	if r.Method == http.MethodGet {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
 		return
 	}
 
-	// Verify Telegram secret token header
+	if r.Method != http.MethodPost {
+		log.Printf("WARN unexpected method: %s", r.Method)
+		w.WriteHeader(http.StatusOK) // return 200 anyway to avoid Telegram retries
+		_, _ = w.Write([]byte("ok"))
+		return
+	}
+
+	// Verify secret token
 	secret := os.Getenv("WEBHOOK_SECRET")
 	if secret != "" && r.Header.Get("X-Telegram-Bot-Api-Secret-Token") != secret {
-		log.Printf("WARN invalid webhook secret from %s", r.RemoteAddr)
+		log.Printf("WARN invalid secret token")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	// Per-IP rate limiting
+	// Rate limit
 	ip := r.Header.Get("X-Forwarded-For")
 	if ip == "" {
 		ip = r.RemoteAddr
@@ -107,23 +116,26 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cap request body size
+	// Read body
 	r.Body = http.MaxBytesReader(w, r.Body, 512*1024)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("WARN read body: %v", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	// Parse Telegram Update
+	log.Printf("INFO body len=%d", len(body))
+
+	// Parse update
 	var update tgbotapi.Update
 	if err := json.Unmarshal(body, &update); err != nil {
-		log.Printf("WARN unmarshal update: %v", err)
+		log.Printf("WARN unmarshal: %v", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	// Process with timeout
+	// Handle
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 
@@ -133,12 +145,12 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// ─── Utility ──────────────────────────────────────────────────────────────────
+// ─── Util ─────────────────────────────────────────────────────────────────────
 
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
-		log.Fatalf("missing required env var: %s", key)
+		log.Fatalf("missing env var: %s", key)
 	}
 	return v
 }
@@ -147,7 +159,7 @@ func mustEnvInt64(key string) int64 {
 	v := mustEnv(key)
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
-		log.Fatalf("env var %s must be an integer: %v", key, err)
+		log.Fatalf("env var %s not integer: %v", key, err)
 	}
 	return n
 }
