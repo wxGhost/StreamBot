@@ -9,8 +9,7 @@
   "routes": [
     {
       "src": "/api/webhook",
-      "dest": "/api/webhook.go",
-      "methods": ["POST", "GET"]
+      "dest": "/api/webhook.go"
     }
   ]
 }
