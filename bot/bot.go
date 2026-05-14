@@ -348,11 +348,21 @@ func (b *Bot) handleInfo(ctx context.Context, cb *tgbotapi.CallbackQuery, propos
 	p, err := b.db.GetProposal(ctx, proposalID)
 	if err != nil {
 		log.Printf("ERROR GetProposal pid=%d: %v", proposalID, err)
+		answer := tgbotapi.NewCallbackWithAlert(cb.ID, "❌ Ошибка получения данных")
+		_, _ = b.api.Request(answer)
 		return
 	}
 	total, _ := b.db.CountProposals(ctx)
 	text := buildInfoMessage(p, total)
 
+	// Telegram limits alert text to 200 chars
+	runes := []rune(text)
+	if len(runes) > 200 {
+		runes = runes[:197]
+		text = string(runes) + "..."
+	}
+
+	// NewCallbackWithAlert sets ShowAlert=true automatically
 	answer := tgbotapi.NewCallbackWithAlert(cb.ID, text)
 	_, _ = b.api.Request(answer)
 }
