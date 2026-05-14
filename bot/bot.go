@@ -103,23 +103,32 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	b.acceptProposal(ctx, msg, st)
 }
 
-// handleStreamerCommand processes commands typed by the streamer in their own chat.
-// Uses msg.Command() so that "/archive@botname" also works in group/channel chats.
+// handleStreamerCommand processes commands and button presses from the streamer.
 func (b *Bot) handleStreamerCommand(ctx context.Context, msg *tgbotapi.Message) {
-	if !msg.IsCommand() {
-		// Streamer typed plain text — ignore silently (never create proposals from streamer side).
+	// Handle slash commands
+	if msg.IsCommand() {
+		switch msg.Command() {
+		case "archive":
+			b.sendArchive(ctx, msg.Chat.ID)
+		case "top":
+			b.sendTop(ctx, msg.Chat.ID)
+		case "stats":
+			b.sendStats(ctx, msg.Chat.ID)
+		case "help", "start":
+			b.replyStreamer(msg.Chat.ID, streamerHelp)
+		}
 		return
 	}
-	switch msg.Command() {
-	case "archive":
+	// Handle reply keyboard button presses
+	switch msg.Text {
+	case "📦 Архив":
 		b.sendArchive(ctx, msg.Chat.ID)
-	case "top":
+	case "⭐ Топ":
 		b.sendTop(ctx, msg.Chat.ID)
-	case "stats":
+	case "📊 Статистика":
 		b.sendStats(ctx, msg.Chat.ID)
-	case "help", "start":
-		b.reply(msg.Chat.ID, streamerHelp)
 	}
+	// Any other plain text — ignore silently
 }
 
 // acceptProposal validates and saves a proposal, then forwards it to the streamer.
@@ -506,12 +515,19 @@ func (b *Bot) sendStats(ctx context.Context, chatID int64) {
 func (b *Bot) reply(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
-	if chatID != b.streamerChatID {
+	if chatID == b.streamerChatID {
+		msg.ReplyMarkup = streamerReplyKeyboard()
+	} else {
 		msg.ReplyMarkup = mainReplyKeyboard()
 	}
 	if _, err := b.api.Send(msg); err != nil {
 		log.Printf("WARN reply chatID=%d: %v", chatID, err)
 	}
+}
+
+// replyStreamer sends a message to the streamer with the streamer keyboard.
+func (b *Bot) replyStreamer(chatID int64, text string) {
+	b.reply(chatID, text)
 }
 
 func (b *Bot) sendWelcome(chatID int64) {
