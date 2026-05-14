@@ -1,7 +1,16 @@
 {
   "version": 2,
-  "env": {
-    "GOFLAGS": "-mod=vendor",
-    "GONOSUMDB": "*"
-  }
+  "builds": [
+    {
+      "src": "api/webhook.go",
+      "use": "@vercel/go"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/webhook",
+      "dest": "/api/webhook.go",
+      "methods": ["POST", "GET"]
+    }
+  ]
 }
