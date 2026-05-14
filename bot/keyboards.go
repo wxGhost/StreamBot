@@ -57,3 +57,16 @@ func channelVoteKeyboard(proposalID, likes, dislikes int) tgbotapi.InlineKeyboar
 		),
 	)
 }
+
+// streamerReplyKeyboard is shown to the streamer at all times.
+func streamerReplyKeyboard() tgbotapi.ReplyKeyboardMarkup {
+	kb := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📦 Архив"),
+			tgbotapi.NewKeyboardButton("⭐ Топ"),
+			tgbotapi.NewKeyboardButton("📊 Статистика"),
+		),
+	)
+	kb.ResizeKeyboard = true
+	return kb
+}
