@@ -202,6 +202,11 @@ func (b *Bot) notifyStreamer(ctx context.Context, p *models.Proposal) {
 // ─── Callback handler ─────────────────────────────────────────────────────────
 
 func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
+	log.Printf("INFO callback: id=%s data=%q chatID=%d", cb.ID, cb.Data, func() int64 {
+		if cb.Message != nil { return cb.Message.Chat.ID }
+		return 0
+	}())
+
 	// Answer immediately to remove the loading spinner
 	answer := tgbotapi.NewCallback(cb.ID, "")
 	_, _ = b.api.Request(answer)
@@ -214,9 +219,14 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 
 	action, proposalID, err := parseCB(cb.Data)
 	if err != nil {
-		log.Printf("WARN parseCB: %v", err)
+		log.Printf("WARN parseCB data=%q err=%v", cb.Data, err)
 		return
 	}
+	log.Printf("INFO callback action=%s proposalID=%d streamerChatID=%d msgChatID=%d",
+		action, proposalID, b.streamerChatID, func() int64 {
+			if cb.Message != nil { return cb.Message.Chat.ID }
+			return 0
+		}())
 
 	// Vote callbacks can come from the public channel (any user)
 	if action == "like" || action == "dislike" {
