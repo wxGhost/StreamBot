@@ -207,12 +207,10 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		return 0
 	}())
 
-	// Answer immediately to remove the loading spinner
-	answer := tgbotapi.NewCallback(cb.ID, "")
-	_, _ = b.api.Request(answer)
-
 	// Pagination callbacks have format "page_archive:N" or "page_top:N"
 	if strings.HasPrefix(cb.Data, "page_") && cb.Message != nil {
+		// Answer silently then paginate
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		b.handlePageCallback(ctx, cb)
 		return
 	}
@@ -220,6 +218,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	action, proposalID, err := parseCB(cb.Data)
 	if err != nil {
 		log.Printf("WARN parseCB data=%q err=%v", cb.Data, err)
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		return
 	}
 	log.Printf("INFO callback action=%s proposalID=%d streamerChatID=%d msgChatID=%d",
@@ -230,14 +229,25 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 
 	// Vote callbacks can come from the public channel (any user)
 	if action == "like" || action == "dislike" {
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		b.handleVote(ctx, cb, proposalID, action)
 		return
 	}
 
 	// All other actions are streamer-only
 	if cb.Message == nil || cb.Message.Chat.ID != b.streamerChatID {
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		return
 	}
+
+	// "info" answers with an alert — don't pre-answer
+	if action == "info" {
+		b.handleInfo(ctx, cb, proposalID)
+		return
+	}
+
+	// All other actions: answer silently first
+	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 
 	switch action {
 	case "publish":
@@ -248,8 +258,6 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		b.handleSetStatus(ctx, cb, proposalID, models.StatusArchived, "📦 Отложено в архив.")
 	case "delete":
 		b.handleDelete(ctx, cb, proposalID)
-	case "info":
-		b.handleInfo(ctx, cb, proposalID)
 	}
 }
 
