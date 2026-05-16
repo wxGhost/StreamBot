@@ -1,7 +1,3 @@
-// cmd/setup/main.go
-// Run once after deploying to Vercel to register the webhook:
-//
-//	BOT_TOKEN=xxx WEBHOOK_SECRET=yyy APP_URL=https://your-project.vercel.app go run ./cmd/setup
 package main
 
 import (
