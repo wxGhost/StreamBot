@@ -2,9 +2,12 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"streamer-bot/models"
 )
@@ -22,7 +25,6 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 	cfg.MinConns = 1
 	cfg.MaxConnLifetime = 30 * time.Minute
 	cfg.MaxConnIdleTime = 5 * time.Minute
-
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
@@ -33,55 +35,38 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 	return &DB{pool: pool}, nil
 }
 
-func (d *DB) Close() {
-	d.pool.Close()
-}
+func (d *DB) Close() { d.pool.Close() }
 
-// CreateProposal inserts a new proposal and returns it with its assigned ID.
+// ─── Proposals ────────────────────────────────────────────────────────────────
+
 func (d *DB) CreateProposal(ctx context.Context, p *models.Proposal) error {
-	const q = `
-		INSERT INTO proposals (user_id, username, first_name, type, content)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, created_at`
+	const q = `INSERT INTO proposals (user_id, username, first_name, type, content)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`
 	return d.pool.QueryRow(ctx, q,
 		p.UserID, p.Username, p.FirstName, p.Type, p.Content,
 	).Scan(&p.ID, &p.CreatedAt)
 }
 
-// SetMessageID stores the streamer-chat message ID on the proposal.
 func (d *DB) SetMessageID(ctx context.Context, proposalID int, msgID int64) error {
-	const q = `UPDATE proposals SET message_id = $1 WHERE id = $2`
-	_, err := d.pool.Exec(ctx, q, msgID, proposalID)
+	_, err := d.pool.Exec(ctx, `UPDATE proposals SET message_id=$1 WHERE id=$2`, msgID, proposalID)
 	return err
 }
 
-// GetProposal fetches a single proposal with vote totals.
 func (d *DB) GetProposal(ctx context.Context, id int) (*models.Proposal, error) {
-	const q = `
-		SELECT id, user_id, username, first_name, type, content, message_id,
-		       status, likes, dislikes, created_at
-		FROM proposals_with_votes WHERE id = $1`
+	const q = `SELECT id,user_id,username,first_name,type,content,message_id,status,likes,dislikes,created_at
+		FROM proposals_with_votes WHERE id=$1`
 	p := &models.Proposal{}
 	err := d.pool.QueryRow(ctx, q, id).Scan(
 		&p.ID, &p.UserID, &p.Username, &p.FirstName,
-		&p.Type, &p.Content, &p.MessageID,
-		&p.Status, &p.Likes, &p.Dislikes, &p.CreatedAt,
+		&p.Type, &p.Content, &p.MessageID, &p.Status,
+		&p.Likes, &p.Dislikes, &p.CreatedAt,
 	)
-	if err != nil {
-		return nil, err
-	}
-	return p, nil
+	return p, err
 }
 
-// ListProposals returns proposals filtered by status, newest first.
 func (d *DB) ListProposals(ctx context.Context, status models.ProposalStatus, limit, offset int) ([]*models.Proposal, error) {
-	const q = `
-		SELECT id, user_id, username, first_name, type, content, message_id,
-		       status, likes, dislikes, created_at
-		FROM proposals_with_votes
-		WHERE status = $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3`
+	const q = `SELECT id,user_id,username,first_name,type,content,message_id,status,likes,dislikes,created_at
+		FROM proposals_with_votes WHERE status=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`
 	rows, err := d.pool.Query(ctx, q, status, limit, offset)
 	if err != nil {
 		return nil, err
@@ -90,15 +75,10 @@ func (d *DB) ListProposals(ctx context.Context, status models.ProposalStatus, li
 	return scanProposals(rows)
 }
 
-// ListTop returns top proposals ordered by net score (likes - dislikes).
 func (d *DB) ListTop(ctx context.Context, limit int) ([]*models.Proposal, error) {
-	const q = `
-		SELECT id, user_id, username, first_name, type, content, message_id,
-		       status, likes, dislikes, created_at
-		FROM proposals_with_votes
-		WHERE status = 'top'
-		ORDER BY (likes - dislikes) DESC, created_at DESC
-		LIMIT $1`
+	const q = `SELECT id,user_id,username,first_name,type,content,message_id,status,likes,dislikes,created_at
+		FROM proposals_with_votes WHERE status='top'
+		ORDER BY (likes-dislikes) DESC, created_at DESC LIMIT $1`
 	rows, err := d.pool.Query(ctx, q, limit)
 	if err != nil {
 		return nil, err
@@ -107,69 +87,203 @@ func (d *DB) ListTop(ctx context.Context, limit int) ([]*models.Proposal, error)
 	return scanProposals(rows)
 }
 
-// SetStatus updates the status of a proposal.
 func (d *DB) SetStatus(ctx context.Context, id int, status models.ProposalStatus) error {
-	const q = `UPDATE proposals SET status = $1 WHERE id = $2`
-	_, err := d.pool.Exec(ctx, q, status, id)
+	_, err := d.pool.Exec(ctx, `UPDATE proposals SET status=$1 WHERE id=$2`, status, id)
 	return err
 }
 
-// DeleteProposal removes a proposal and its votes from the database.
 func (d *DB) DeleteProposal(ctx context.Context, id int) error {
-	const q = `DELETE FROM proposals WHERE id = $1`
-	_, err := d.pool.Exec(ctx, q, id)
+	_, err := d.pool.Exec(ctx, `DELETE FROM proposals WHERE id=$1`, id)
 	return err
 }
 
-// CountProposals returns the total number of proposals regardless of status.
 func (d *DB) CountProposals(ctx context.Context) (int, error) {
 	var n int
-	err := d.pool.QueryRow(ctx, `SELECT COUNT(*) FROM proposals`).Scan(&n)
-	return n, err
+	return n, d.pool.QueryRow(ctx, `SELECT COUNT(*) FROM proposals`).Scan(&n)
 }
 
-// Upsert a vote; returns updated likes/dislikes counts for the proposal.
+func (d *DB) CountByStatus(ctx context.Context, status models.ProposalStatus) (int, error) {
+	var n int
+	return n, d.pool.QueryRow(ctx, `SELECT COUNT(*) FROM proposals WHERE status=$1`, status).Scan(&n)
+}
+
+// ─── Votes ────────────────────────────────────────────────────────────────────
+
 func (d *DB) UpsertVote(ctx context.Context, proposalID int, userID int64, value int) (likes, dislikes int, err error) {
-	const upsert = `
-		INSERT INTO votes (proposal_id, user_id, value)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (proposal_id, user_id) DO UPDATE SET value = EXCLUDED.value`
-	_, err = d.pool.Exec(ctx, upsert, proposalID, userID, value)
+	_, err = d.pool.Exec(ctx,
+		`INSERT INTO votes(proposal_id,user_id,value) VALUES($1,$2,$3)
+		 ON CONFLICT(proposal_id,user_id) DO UPDATE SET value=EXCLUDED.value`,
+		proposalID, userID, value)
 	if err != nil {
 		return 0, 0, err
 	}
-	const counts = `
-		SELECT
-			COALESCE(SUM(CASE WHEN value = 1  THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN value = -1 THEN 1 ELSE 0 END), 0)
-		FROM votes WHERE proposal_id = $1`
-	err = d.pool.QueryRow(ctx, counts, proposalID).Scan(&likes, &dislikes)
-	return likes, dislikes, err
+	err = d.pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(CASE WHEN value=1 THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(CASE WHEN value=-1 THEN 1 ELSE 0 END),0)
+		 FROM votes WHERE proposal_id=$1`, proposalID).Scan(&likes, &dislikes)
+	return
 }
 
-// GetVoteByUser returns the user's vote value (1 or -1) or 0 if not voted.
-func (d *DB) GetVoteByUser(ctx context.Context, proposalID int, userID int64) (int, error) {
-	var v int
+// ─── Blocks ───────────────────────────────────────────────────────────────────
+
+func (d *DB) BlockUser(ctx context.Context, userID int64, until time.Time) error {
+	_, err := d.pool.Exec(ctx,
+		`INSERT INTO user_blocks(user_id,blocked_until) VALUES($1,$2)
+		 ON CONFLICT(user_id) DO UPDATE SET blocked_until=EXCLUDED.blocked_until, created_at=NOW()`,
+		userID, until)
+	return err
+}
+
+// IsBlocked returns (blocked, error). blocked=true means user cannot send proposals.
+func (d *DB) IsBlocked(ctx context.Context, userID int64) (bool, error) {
+	var until time.Time
 	err := d.pool.QueryRow(ctx,
-		`SELECT value FROM votes WHERE proposal_id = $1 AND user_id = $2`,
-		proposalID, userID,
-	).Scan(&v)
-	if err != nil {
-		// pgx returns pgx.ErrNoRows — treat as no vote
-		return 0, nil
+		`SELECT blocked_until FROM user_blocks WHERE user_id=$1`, userID).Scan(&until)
+	if err == pgx.ErrNoRows {
+		return false, nil
 	}
-	return v, nil
+	if err != nil {
+		return false, err
+	}
+	return time.Now().Before(until), nil
 }
 
-// --- helpers ---
+// ─── Cooldowns ────────────────────────────────────────────────────────────────
 
-type rowScanner interface {
-	Scan(dest ...any) error
-	Next() bool
-	Err() error
+func (d *DB) SetCooldown(ctx context.Context, userID int64, kind string, expiresAt time.Time) error {
+	_, err := d.pool.Exec(ctx,
+		`INSERT INTO user_cooldowns(user_id,kind,expires_at) VALUES($1,$2,$3)
+		 ON CONFLICT(user_id,kind) DO UPDATE SET expires_at=EXCLUDED.expires_at`,
+		userID, kind, expiresAt)
+	return err
 }
 
-func scanProposals(rows rowScanner) ([]*models.Proposal, error) {
+// GetCooldown returns expiry time if active, zero time if not.
+func (d *DB) GetCooldown(ctx context.Context, userID int64, kind string) (time.Time, error) {
+	var expires time.Time
+	err := d.pool.QueryRow(ctx,
+		`SELECT expires_at FROM user_cooldowns WHERE user_id=$1 AND kind=$2 AND expires_at>NOW()`,
+		userID, kind).Scan(&expires)
+	if err == pgx.ErrNoRows {
+		return time.Time{}, nil
+	}
+	return expires, err
+}
+
+// ─── Game stacking ────────────────────────────────────────────────────────────
+
+type GameProposer struct {
+	UserID    *int64  `json:"user_id,omitempty"`
+	Username  *string `json:"username,omitempty"`
+	FirstName *string `json:"first_name,omitempty"`
+}
+
+type GameStack struct {
+	ID            int
+	GameTitle     string
+	GameTitleOrig string
+	Count         int
+	Proposers     []GameProposer
+	LastProposed  time.Time
+}
+
+func NormalizeGameTitle(title string) string {
+	return strings.ToLower(strings.TrimSpace(title))
+}
+
+func (d *DB) UpsertGameStack(ctx context.Context, titleOrig string, proposer GameProposer) (*GameStack, error) {
+	normalized := NormalizeGameTitle(titleOrig)
+	var stack GameStack
+	var proposersJSON []byte
+
+	err := d.pool.QueryRow(ctx,
+		`SELECT id,game_title,game_title_orig,count,proposers,last_proposed_at
+		 FROM game_stacks WHERE game_title=$1`, normalized,
+	).Scan(&stack.ID, &stack.GameTitle, &stack.GameTitleOrig, &stack.Count, &proposersJSON, &stack.LastProposed)
+
+	if err == pgx.ErrNoRows {
+		newProposers, _ := json.Marshal([]GameProposer{proposer})
+		err2 := d.pool.QueryRow(ctx,
+			`INSERT INTO game_stacks(game_title,game_title_orig,count,proposers)
+			 VALUES($1,$2,1,$3)
+			 RETURNING id,game_title,game_title_orig,count,proposers,last_proposed_at`,
+			normalized, titleOrig, newProposers,
+		).Scan(&stack.ID, &stack.GameTitle, &stack.GameTitleOrig, &stack.Count, &proposersJSON, &stack.LastProposed)
+		if err2 != nil {
+			return nil, err2
+		}
+	} else if err != nil {
+		return nil, err
+	} else {
+		var proposers []GameProposer
+		_ = json.Unmarshal(proposersJSON, &proposers)
+		proposers = append(proposers, proposer)
+		newBytes, _ := json.Marshal(proposers)
+		err2 := d.pool.QueryRow(ctx,
+			`UPDATE game_stacks SET count=count+1, proposers=$1, last_proposed_at=NOW()
+			 WHERE game_title=$2
+			 RETURNING id,game_title,game_title_orig,count,proposers,last_proposed_at`,
+			newBytes, normalized,
+		).Scan(&stack.ID, &stack.GameTitle, &stack.GameTitleOrig, &stack.Count, &proposersJSON, &stack.LastProposed)
+		if err2 != nil {
+			return nil, err2
+		}
+	}
+	_ = json.Unmarshal(proposersJSON, &stack.Proposers)
+	return &stack, nil
+}
+
+func (d *DB) GetTopGameStacks(ctx context.Context, limit int) ([]*GameStack, error) {
+	rows, err := d.pool.Query(ctx,
+		`SELECT id,game_title,game_title_orig,count,proposers,last_proposed_at
+		 FROM game_stacks ORDER BY count DESC, last_proposed_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*GameStack
+	for rows.Next() {
+		s := &GameStack{}
+		var pj []byte
+		if err := rows.Scan(&s.ID, &s.GameTitle, &s.GameTitleOrig, &s.Count, &pj, &s.LastProposed); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(pj, &s.Proposers)
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ─── Streamer pending ─────────────────────────────────────────────────────────
+
+func (d *DB) SetPending(ctx context.Context, streamerID int64, action string, targetUserID int64) error {
+	_, err := d.pool.Exec(ctx,
+		`INSERT INTO streamer_pending(streamer_id,action,target_user_id)
+		 VALUES($1,$2,$3)
+		 ON CONFLICT(streamer_id) DO UPDATE SET action=EXCLUDED.action,
+		 	target_user_id=EXCLUDED.target_user_id, created_at=NOW()`,
+		streamerID, action, targetUserID)
+	return err
+}
+
+func (d *DB) GetPending(ctx context.Context, streamerID int64) (action string, targetUserID int64, err error) {
+	err = d.pool.QueryRow(ctx,
+		`SELECT action,target_user_id FROM streamer_pending WHERE streamer_id=$1`, streamerID,
+	).Scan(&action, &targetUserID)
+	if err == pgx.ErrNoRows {
+		return "", 0, nil
+	}
+	return
+}
+
+func (d *DB) ClearPending(ctx context.Context, streamerID int64) error {
+	_, err := d.pool.Exec(ctx, `DELETE FROM streamer_pending WHERE streamer_id=$1`, streamerID)
+	return err
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+func scanProposals(rows pgx.Rows) ([]*models.Proposal, error) {
 	var out []*models.Proposal
 	for rows.Next() {
 		p := &models.Proposal{}
@@ -183,13 +297,4 @@ func scanProposals(rows rowScanner) ([]*models.Proposal, error) {
 		out = append(out, p)
 	}
 	return out, rows.Err()
-}
-
-// CountByStatus returns the count of proposals with a given status.
-func (d *DB) CountByStatus(ctx context.Context, status models.ProposalStatus) (int, error) {
-	var n int
-	err := d.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM proposals WHERE status = $1`, status,
-	).Scan(&n)
-	return n, err
 }
