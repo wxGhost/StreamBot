@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -15,33 +16,28 @@ import (
 )
 
 const (
-	maxContentLength = 4000 // chars
 	maxContentRunes  = 4000
+	anonCooldown     = 30 * time.Minute
+	gameCooldown     = 24 * time.Hour
+	pageSize         = 10
 )
 
 // Bot encapsulates all bot logic.
 type Bot struct {
-	api           *tgbotapi.BotAPI
-	db            *db.DB
+	api            *tgbotapi.BotAPI
+	db             *db.DB
 	streamerChatID int64
 	channelID      int64
 }
 
-// New creates a new Bot instance.
 func New(token string, database *db.DB, streamerChatID, channelID int64) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("init bot api: %w", err)
 	}
-	return &Bot{
-		api:           api,
-		db:            database,
-		streamerChatID: streamerChatID,
-		channelID:      channelID,
-	}, nil
+	return &Bot{api: api, db: database, streamerChatID: streamerChatID, channelID: channelID}, nil
 }
 
-// API returns the underlying BotAPI (used to register webhook).
 func (b *Bot) API() *tgbotapi.BotAPI { return b.api }
 
 // HandleUpdate is the main dispatcher.
@@ -57,55 +53,59 @@ func (b *Bot) HandleUpdate(ctx context.Context, update tgbotapi.Update) {
 // ─── Message handler ──────────────────────────────────────────────────────────
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
-	// Only allow messages from non-bot users
 	if msg.From == nil || msg.From.IsBot {
+		return
+	}
+
+	// Streamer's own chat
+	if msg.Chat.ID == b.streamerChatID {
+		b.handleStreamerMessage(ctx, msg)
 		return
 	}
 
 	userID := msg.From.ID
 
-	// Streamer's own commands (only from streamer chat)
-	if msg.Chat.ID == b.streamerChatID {
-		b.handleStreamerCommand(ctx, msg)
-		return
-	}
-
-	// User commands / state machine
-	// Handle /start command (works as "/start@botname" too)
+	// /start command
 	if msg.IsCommand() && msg.Command() == "start" {
-		b.sendWelcome(msg.Chat.ID)
 		globalState.clear(userID)
+		b.sendWelcome(msg.Chat.ID)
 		return
 	}
 
+	// Menu buttons
 	switch msg.Text {
 	case "🎮 Предложить игру":
 		globalState.set(userID, stateGame)
-		b.reply(msg.Chat.ID, "🎮 <b>Предложи игру!</b>\n\nОтправь мне название или описание игры — я обязательно передам стримеру. Можешь написать текст или переслать сообщение.")
+		b.reply(msg.Chat.ID, "🎮 <b>Предложи игру!</b>\n\nНапиши название игры так, как оно звучит в оригинале. Например: <i>Elden Ring</i>, <i>Cyberpunk 2077</i>.")
 		return
 	case "💡 Предложения на стрим":
 		globalState.set(userID, stateStream)
-		b.reply(msg.Chat.ID, "💡 <b>Предложение на стрим!</b>\n\nПришли своё предложение — я обязательно передам стримеру. Можешь написать текст или переслать сообщение.")
+		b.reply(msg.Chat.ID, "💡 <b>Предложение на стрим!</b>\n\nПришли своё предложение — я обязательно передам стримеру.")
 		return
 	case "🕵️ Анонимно":
 		globalState.set(userID, stateAnon)
-		b.reply(msg.Chat.ID, "🕵️ <b>Анонимное предложение.</b>\n\nОтправляй — я перешлю его стримеру без указания твоего имени.")
+		b.reply(msg.Chat.ID, "🕵️ <b>Анонимное предложение.</b>\n\nОтправляй — перешлю стримеру без указания твоего имени.")
 		return
 	}
 
-	// If user has an active state — accept their proposal
+	// Accept proposal if user has active state
 	st := globalState.get(userID)
 	if st == stateIdle {
 		b.sendWelcome(msg.Chat.ID)
 		return
 	}
-
 	b.acceptProposal(ctx, msg, st)
 }
 
-// handleStreamerCommand processes commands and button presses from the streamer.
-func (b *Bot) handleStreamerCommand(ctx context.Context, msg *tgbotapi.Message) {
-	// Handle slash commands
+// handleStreamerMessage handles messages from the streamer.
+func (b *Bot) handleStreamerMessage(ctx context.Context, msg *tgbotapi.Message) {
+	// Check if streamer has a pending action (e.g. waiting for block duration)
+	action, targetUserID, err := b.db.GetPending(ctx, b.streamerChatID)
+	if err == nil && action == "block" && targetUserID != 0 {
+		b.handlePendingBlock(ctx, msg, targetUserID)
+		return
+	}
+
 	if msg.IsCommand() {
 		switch msg.Command() {
 		case "archive":
@@ -114,12 +114,14 @@ func (b *Bot) handleStreamerCommand(ctx context.Context, msg *tgbotapi.Message) 
 			b.sendTop(ctx, msg.Chat.ID)
 		case "stats":
 			b.sendStats(ctx, msg.Chat.ID)
+		case "gamestats":
+			b.sendGameStats(ctx, msg.Chat.ID)
 		case "help", "start":
-			b.replyStreamer(msg.Chat.ID, streamerHelp)
+			b.reply(msg.Chat.ID, streamerHelp)
 		}
 		return
 	}
-	// Handle reply keyboard button presses
+
 	switch msg.Text {
 	case "📦 Архив":
 		b.sendArchive(ctx, msg.Chat.ID)
@@ -127,33 +129,90 @@ func (b *Bot) handleStreamerCommand(ctx context.Context, msg *tgbotapi.Message) 
 		b.sendTop(ctx, msg.Chat.ID)
 	case "📊 Статистика":
 		b.sendStats(ctx, msg.Chat.ID)
+	case "🎮 Статистика игр":
+		b.sendGameStats(ctx, msg.Chat.ID)
 	}
-	// Any other plain text — ignore silently
 }
 
-// acceptProposal validates and saves a proposal, then forwards it to the streamer.
+// handlePendingBlock processes the streamer's reply with block duration in minutes.
+func (b *Bot) handlePendingBlock(ctx context.Context, msg *tgbotapi.Message, targetUserID int64) {
+	minutes, err := strconv.Atoi(strings.TrimSpace(msg.Text))
+	if err != nil || minutes <= 0 {
+		b.reply(msg.Chat.ID, "⚠️ Введи количество минут числом, например: <b>40</b>")
+		return
+	}
+
+	until := time.Now().Add(time.Duration(minutes) * time.Minute)
+	if err := b.db.BlockUser(ctx, targetUserID, until); err != nil {
+		log.Printf("ERROR BlockUser uid=%d: %v", targetUserID, err)
+		b.reply(msg.Chat.ID, "❌ Ошибка при блокировке.")
+		return
+	}
+
+	_ = b.db.ClearPending(ctx, b.streamerChatID)
+	b.reply(msg.Chat.ID, fmt.Sprintf("🚫 Пользователь заблокирован на <b>%d мин.</b> (до %s UTC).",
+		minutes, until.UTC().Format("15:04 02.01")))
+}
+
+// acceptProposal validates and saves a proposal, then forwards to streamer.
 func (b *Bot) acceptProposal(ctx context.Context, msg *tgbotapi.Message, st userState) {
 	userID := msg.From.ID
 	chatID := msg.Chat.ID
 
-	// Determine content: prefer ForwardOrigin caption/text, else raw text
+	// Check block (silent — don't tell user they are blocked)
+	blocked, err := b.db.IsBlocked(ctx, userID)
+	if err != nil {
+		log.Printf("WARN IsBlocked uid=%d: %v", userID, err)
+	}
+	if blocked {
+		// Silent: just clear state and do nothing
+		globalState.clear(userID)
+		return
+	}
+
 	content := extractContent(msg)
 	if content == "" {
 		b.reply(chatID, "Пожалуйста, отправь текстовое сообщение или перешли пост из канала.")
 		return
 	}
-
-	// Validate length
 	if utf8.RuneCountInString(content) > maxContentRunes {
 		b.reply(chatID, fmt.Sprintf("⚠️ Сообщение слишком длинное. Максимум %d символов.", maxContentRunes))
 		return
 	}
 
-	// Build proposal
-	p := &models.Proposal{
-		Content: content,
+	// Anon cooldown
+	if st == stateAnon {
+		exp, err := b.db.GetCooldown(ctx, userID, "anon")
+		if err != nil {
+			log.Printf("WARN GetCooldown uid=%d anon: %v", userID, err)
+		}
+		if !exp.IsZero() {
+			remaining := time.Until(exp).Round(time.Minute)
+			b.reply(chatID, fmt.Sprintf("⏳ Следующее анонимное сообщение ты сможешь отправить через <b>%d мин.</b>",
+				int(remaining.Minutes())+1))
+			return
+		}
 	}
 
+	// Game cooldown (per user per game title, 24h)
+	if st == stateGame {
+		normalized := db.NormalizeGameTitle(content)
+		cdKey := "game:" + normalized
+		exp, err := b.db.GetCooldown(ctx, userID, cdKey)
+		if err != nil {
+			log.Printf("WARN GetCooldown uid=%d game: %v", userID, err)
+		}
+		if !exp.IsZero() {
+			remaining := time.Until(exp).Round(time.Minute)
+			hrs := int(remaining.Hours())
+			mins := int(remaining.Minutes()) % 60
+			b.reply(chatID, fmt.Sprintf("⏳ Эту игру ты уже предлагал. Повторно можно через <b>%dч %dмин.</b>", hrs, mins))
+			return
+		}
+	}
+
+	// Build proposal
+	p := &models.Proposal{Content: content}
 	switch st {
 	case stateGame:
 		p.Type = models.TypeGame
@@ -163,7 +222,6 @@ func (b *Bot) acceptProposal(ctx context.Context, msg *tgbotapi.Message, st user
 		p.Type = models.TypeAnon
 	}
 
-	// Attach user identity only for non-anon
 	if st != stateAnon {
 		p.UserID = &msg.From.ID
 		if msg.From.UserName != "" {
@@ -174,35 +232,44 @@ func (b *Bot) acceptProposal(ctx context.Context, msg *tgbotapi.Message, st user
 		}
 	}
 
-	// Save to DB
 	if err := b.db.CreateProposal(ctx, p); err != nil {
 		log.Printf("ERROR CreateProposal uid=%d: %v", userID, err)
 		b.reply(chatID, "Что-то пошло не так 😔 Попробуй ещё раз позже.")
 		return
 	}
 
-	// Confirm to user
+	// Set cooldowns
+	if st == stateAnon {
+		_ = b.db.SetCooldown(ctx, userID, "anon", time.Now().Add(anonCooldown))
+	}
+	if st == stateGame {
+		normalized := db.NormalizeGameTitle(content)
+		_ = b.db.SetCooldown(ctx, userID, "game:"+normalized, time.Now().Add(gameCooldown))
+
+		// Update game stack
+		proposer := db.GameProposer{UserID: p.UserID, Username: p.Username, FirstName: p.FirstName}
+		if _, err := b.db.UpsertGameStack(ctx, content, proposer); err != nil {
+			log.Printf("WARN UpsertGameStack: %v", err)
+		}
+	}
+
 	globalState.clear(userID)
 	b.reply(chatID, "✅ Готово! Твоё предложение отправлено стримеру.")
-
-	// Forward to streamer
 	b.notifyStreamer(ctx, p)
 }
 
-// notifyStreamer sends the proposal to the streamer chat with inline action buttons.
+// notifyStreamer sends the proposal to the streamer chat.
 func (b *Bot) notifyStreamer(ctx context.Context, p *models.Proposal) {
 	text := buildStreamerMessage(p)
 	msg := tgbotapi.NewMessage(b.streamerChatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
-	msg.ReplyMarkup = proposalInlineKeyboard(p.ID)
+	msg.ReplyMarkup = proposalInlineKeyboard(p.ID, p.UserID)
 
 	sent, err := b.api.Send(msg)
 	if err != nil {
 		log.Printf("ERROR notifyStreamer pid=%d: %v", p.ID, err)
 		return
 	}
-
-	// Store message ID for later deletion/editing
 	if err := b.db.SetMessageID(ctx, p.ID, int64(sent.MessageID)); err != nil {
 		log.Printf("WARN SetMessageID pid=%d: %v", p.ID, err)
 	}
@@ -211,14 +278,9 @@ func (b *Bot) notifyStreamer(ctx context.Context, p *models.Proposal) {
 // ─── Callback handler ─────────────────────────────────────────────────────────
 
 func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
-	log.Printf("INFO callback: id=%s data=%q chatID=%d", cb.ID, cb.Data, func() int64 {
-		if cb.Message != nil { return cb.Message.Chat.ID }
-		return 0
-	}())
+	log.Printf("INFO callback data=%q", cb.Data)
 
-	// Pagination callbacks have format "page_archive:N" or "page_top:N"
 	if strings.HasPrefix(cb.Data, "page_") && cb.Message != nil {
-		// Answer silently then paginate
 		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		b.handlePageCallback(ctx, cb)
 		return
@@ -226,36 +288,27 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 
 	action, proposalID, err := parseCB(cb.Data)
 	if err != nil {
-		log.Printf("WARN parseCB data=%q err=%v", cb.Data, err)
+		log.Printf("WARN parseCB data=%q: %v", cb.Data, err)
 		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		return
 	}
-	log.Printf("INFO callback action=%s proposalID=%d streamerChatID=%d msgChatID=%d",
-		action, proposalID, b.streamerChatID, func() int64 {
-			if cb.Message != nil { return cb.Message.Chat.ID }
-			return 0
-		}())
 
-	// Vote callbacks can come from the public channel (any user)
 	if action == "like" || action == "dislike" {
 		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		b.handleVote(ctx, cb, proposalID, action)
 		return
 	}
 
-	// All other actions are streamer-only
 	if cb.Message == nil || cb.Message.Chat.ID != b.streamerChatID {
 		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		return
 	}
 
-	// "info" answers with an alert — don't pre-answer
 	if action == "info" {
 		b.handleInfo(ctx, cb, proposalID)
 		return
 	}
 
-	// All other actions: answer silently first
 	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 
 	switch action {
@@ -267,34 +320,8 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		b.handleSetStatus(ctx, cb, proposalID, models.StatusArchived, "📦 Отложено в архив.")
 	case "delete":
 		b.handleDelete(ctx, cb, proposalID)
-	}
-}
-
-func (b *Bot) handlePageCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
-	// Only streamer can paginate
-	if cb.Message.Chat.ID != b.streamerChatID {
-		return
-	}
-	parts := strings.SplitN(cb.Data, ":", 2)
-	if len(parts) != 2 {
-		return
-	}
-	pageType := parts[0]    // "page_archive" or "page_top"
-	offset := 0
-	fmt.Sscanf(parts[1], "%d", &offset)
-	if offset < 0 {
-		offset = 0
-	}
-
-	// Delete the old list message and send a new one
-	del := tgbotapi.NewDeleteMessage(cb.Message.Chat.ID, cb.Message.MessageID)
-	_, _ = b.api.Request(del)
-
-	switch pageType {
-	case "page_archive":
-		b.sendPagedList(ctx, cb.Message.Chat.ID, models.StatusArchived, "📦 Архив", offset)
-	case "page_top":
-		b.sendPagedTop(ctx, cb.Message.Chat.ID, offset)
+	case "block":
+		b.handleBlockInit(ctx, cb, proposalID)
 	}
 }
 
@@ -306,18 +333,14 @@ func (b *Bot) handleVote(ctx context.Context, cb *tgbotapi.CallbackQuery, propos
 	if action == "dislike" {
 		value = -1
 	}
-
 	likes, dislikes, err := b.db.UpsertVote(ctx, proposalID, cb.From.ID, value)
 	if err != nil {
-		log.Printf("ERROR UpsertVote pid=%d uid=%d: %v", proposalID, cb.From.ID, err)
+		log.Printf("ERROR UpsertVote pid=%d: %v", proposalID, err)
 		return
 	}
-
-	// Update vote counter on the channel message
 	if cb.Message != nil {
 		edit := tgbotapi.NewEditMessageReplyMarkup(
-			cb.Message.Chat.ID,
-			cb.Message.MessageID,
+			cb.Message.Chat.ID, cb.Message.MessageID,
 			channelVoteKeyboard(proposalID, likes, dislikes),
 		)
 		_, _ = b.api.Send(edit)
@@ -330,32 +353,22 @@ func (b *Bot) handlePublish(ctx context.Context, cb *tgbotapi.CallbackQuery, pro
 		log.Printf("ERROR GetProposal pid=%d: %v", proposalID, err)
 		return
 	}
-
-	// Post to channel
-	text := buildChannelMessage(p)
-	post := tgbotapi.NewMessage(b.channelID, text)
+	post := tgbotapi.NewMessage(b.channelID, buildChannelMessage(p))
 	post.ParseMode = tgbotapi.ModeHTML
 	post.ReplyMarkup = channelVoteKeyboard(proposalID, 0, 0)
-
-	_, err = b.api.Send(post)
-	if err != nil {
-		log.Printf("ERROR publish to channel pid=%d: %v", proposalID, err)
-		notif := tgbotapi.NewCallback(cb.ID, "❌ Ошибка публикации")
-		_, _ = b.api.Request(notif)
+	if _, err := b.api.Send(post); err != nil {
+		log.Printf("ERROR publish pid=%d: %v", proposalID, err)
 		return
 	}
-
-	// Edit original streamer message to reflect published state
 	b.editStreamerMsg(cb.Message, p, "✅ Опубликовано в канале")
 }
 
 func (b *Bot) handleSetStatus(ctx context.Context, cb *tgbotapi.CallbackQuery, proposalID int, status models.ProposalStatus, note string) {
 	if err := b.db.SetStatus(ctx, proposalID, status); err != nil {
-		log.Printf("ERROR SetStatus pid=%d status=%s: %v", proposalID, status, err)
+		log.Printf("ERROR SetStatus pid=%d: %v", proposalID, err)
 		return
 	}
-	p, _ := b.db.GetProposal(ctx, proposalID)
-	if p != nil {
+	if p, err := b.db.GetProposal(ctx, proposalID); err == nil {
 		b.editStreamerMsg(cb.Message, p, note)
 	}
 }
@@ -363,8 +376,7 @@ func (b *Bot) handleSetStatus(ctx context.Context, cb *tgbotapi.CallbackQuery, p
 func (b *Bot) handleDelete(ctx context.Context, cb *tgbotapi.CallbackQuery, proposalID int) {
 	p, err := b.db.GetProposal(ctx, proposalID)
 	if err == nil && p.MessageID != nil {
-		del := tgbotapi.NewDeleteMessage(b.streamerChatID, int(*p.MessageID))
-		_, _ = b.api.Request(del)
+		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(b.streamerChatID, int(*p.MessageID)))
 	}
 	if err := b.db.DeleteProposal(ctx, proposalID); err != nil {
 		log.Printf("ERROR DeleteProposal pid=%d: %v", proposalID, err)
@@ -375,28 +387,58 @@ func (b *Bot) handleInfo(ctx context.Context, cb *tgbotapi.CallbackQuery, propos
 	p, err := b.db.GetProposal(ctx, proposalID)
 	if err != nil {
 		log.Printf("ERROR GetProposal pid=%d: %v", proposalID, err)
-		answer := tgbotapi.NewCallbackWithAlert(cb.ID, "❌ Ошибка получения данных")
-		_, _ = b.api.Request(answer)
+		_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, "❌ Ошибка получения данных"))
 		return
 	}
 	total, _ := b.db.CountProposals(ctx)
 	text := buildInfoMessage(p, total)
-
-	// Telegram limits alert text to 200 chars
 	runes := []rune(text)
 	if len(runes) > 200 {
-		runes = runes[:197]
-		text = string(runes) + "..."
+		text = string(runes[:197]) + "..."
 	}
+	_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, text))
+}
 
-	// NewCallbackWithAlert sets ShowAlert=true automatically
-	answer := tgbotapi.NewCallbackWithAlert(cb.ID, text)
-	_, _ = b.api.Request(answer)
+// handleBlockInit starts the block flow: save pending state and ask streamer for duration.
+func (b *Bot) handleBlockInit(ctx context.Context, cb *tgbotapi.CallbackQuery, proposalID int) {
+	p, err := b.db.GetProposal(ctx, proposalID)
+	if err != nil || p.UserID == nil {
+		b.reply(b.streamerChatID, "❌ Нельзя заблокировать анонимного пользователя.")
+		return
+	}
+	if err := b.db.SetPending(ctx, b.streamerChatID, "block", *p.UserID); err != nil {
+		log.Printf("ERROR SetPending: %v", err)
+		return
+	}
+	name := html.EscapeString(p.DisplayName())
+	b.reply(b.streamerChatID, fmt.Sprintf(
+		"🚫 Блокировка пользователя <b>%s</b>\n\nНа сколько минут заблокировать? Напиши число:", name))
+}
+
+func (b *Bot) handlePageCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
+	if cb.Message.Chat.ID != b.streamerChatID {
+		return
+	}
+	parts := strings.SplitN(cb.Data, ":", 2)
+	if len(parts) != 2 {
+		return
+	}
+	offset := 0
+	fmt.Sscanf(parts[1], "%d", &offset)
+	if offset < 0 {
+		offset = 0
+	}
+	del := tgbotapi.NewDeleteMessage(cb.Message.Chat.ID, cb.Message.MessageID)
+	_, _ = b.api.Request(del)
+	switch parts[0] {
+	case "page_archive":
+		b.sendPagedList(ctx, cb.Message.Chat.ID, models.StatusArchived, "📦 Архив", offset)
+	case "page_top":
+		b.sendPagedTop(ctx, cb.Message.Chat.ID, offset)
+	}
 }
 
 // ─── Streamer list commands ───────────────────────────────────────────────────
-
-const pageSize = 10
 
 func (b *Bot) sendArchive(ctx context.Context, chatID int64) {
 	b.sendPagedList(ctx, chatID, models.StatusArchived, "📦 Архив", 0)
@@ -406,7 +448,6 @@ func (b *Bot) sendTop(ctx context.Context, chatID int64) {
 	b.sendPagedTop(ctx, chatID, 0)
 }
 
-// sendPagedList sends a paginated list of proposals with a given status.
 func (b *Bot) sendPagedList(ctx context.Context, chatID int64, status models.ProposalStatus, title string, offset int) {
 	proposals, err := b.db.ListProposals(ctx, status, pageSize+1, offset)
 	if err != nil {
@@ -417,47 +458,23 @@ func (b *Bot) sendPagedList(ctx context.Context, chatID int64, status models.Pro
 		b.reply(chatID, fmt.Sprintf("%s пуст.", title))
 		return
 	}
-
 	hasMore := len(proposals) > pageSize
 	if hasMore {
 		proposals = proposals[:pageSize]
 	}
-
 	text := buildListMessage(title, proposals, offset)
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
-
-	// Pagination buttons
-	var rows [][]tgbotapi.InlineKeyboardButton
-	var nav []tgbotapi.InlineKeyboardButton
-	if offset > 0 {
-		prev := offset - pageSize
-		if prev < 0 {
-			prev = 0
-		}
-		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("◀️ Назад", fmt.Sprintf("page_archive:%d", prev)))
-	}
-	if hasMore {
-		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("▶️ Дальше", fmt.Sprintf("page_archive:%d", offset+pageSize)))
-	}
-	if len(nav) > 0 {
-		rows = append(rows, nav)
-		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
-	}
-
-	if _, err := b.api.Send(msg); err != nil {
-		log.Printf("WARN sendPagedList: %v", err)
-	}
+	msg.ReplyMarkup = paginationKeyboard("page_archive", offset, hasMore)
+	_, _ = b.api.Send(msg)
 }
 
-// sendPagedTop sends a paginated top list.
 func (b *Bot) sendPagedTop(ctx context.Context, chatID int64, offset int) {
 	all, err := b.db.ListTop(ctx, pageSize+1+offset)
 	if err != nil {
 		b.reply(chatID, "❌ Ошибка при получении топа.")
 		return
 	}
-	// Manual slice for offset
 	if offset > len(all) {
 		b.reply(chatID, "⭐ Больше нет.")
 		return
@@ -471,31 +488,11 @@ func (b *Bot) sendPagedTop(ctx context.Context, chatID int64, offset int) {
 		b.reply(chatID, "⭐ Топ пуст.")
 		return
 	}
-
 	text := buildListMessage("⭐ Топ предложений", all, offset)
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
-
-	var rows [][]tgbotapi.InlineKeyboardButton
-	var nav []tgbotapi.InlineKeyboardButton
-	if offset > 0 {
-		prev := offset - pageSize
-		if prev < 0 {
-			prev = 0
-		}
-		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("◀️ Назад", fmt.Sprintf("page_top:%d", prev)))
-	}
-	if hasMore {
-		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("▶️ Дальше", fmt.Sprintf("page_top:%d", offset+pageSize)))
-	}
-	if len(nav) > 0 {
-		rows = append(rows, nav)
-		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
-	}
-
-	if _, err := b.api.Send(msg); err != nil {
-		log.Printf("WARN sendPagedTop: %v", err)
-	}
+	msg.ReplyMarkup = paginationKeyboard("page_top", offset, hasMore)
+	_, _ = b.api.Send(msg)
 }
 
 func (b *Bot) sendStats(ctx context.Context, chatID int64) {
@@ -503,11 +500,45 @@ func (b *Bot) sendStats(ctx context.Context, chatID int64) {
 	active, _ := b.db.CountByStatus(ctx, models.StatusActive)
 	archived, _ := b.db.CountByStatus(ctx, models.StatusArchived)
 	top, _ := b.db.CountByStatus(ctx, models.StatusTop)
-
 	b.reply(chatID, fmt.Sprintf(
-		"📊 <b>Статистика</b>\n\nВсего предложений: <b>%d</b>\nАктивных: <b>%d</b>\nВ архиве: <b>%d</b>\nВ топе: <b>%d</b>",
+		"📊 <b>Статистика</b>\n\nВсего: <b>%d</b>\nАктивных: <b>%d</b>\nВ архиве: <b>%d</b>\nВ топе: <b>%d</b>",
 		total, active, archived, top,
 	))
+}
+
+func (b *Bot) sendGameStats(ctx context.Context, chatID int64) {
+	stacks, err := b.db.GetTopGameStacks(ctx, 20)
+	if err != nil || len(stacks) == 0 {
+		b.reply(chatID, "🎮 Статистика игр пуста.")
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("<b>🎮 Топ запрошенных игр</b>\n\n")
+	for i, s := range stacks {
+		sb.WriteString(fmt.Sprintf("%d. <b>%s</b> — %d раз\n",
+			i+1, html.EscapeString(s.GameTitleOrig), s.Count))
+		// Show up to 3 proposers
+		shown := s.Proposers
+		if len(shown) > 3 {
+			shown = shown[len(shown)-3:]
+		}
+		for _, pr := range shown {
+			name := "Аноним"
+			if pr.FirstName != nil {
+				name = *pr.FirstName
+			} else if pr.Username != nil {
+				name = "@" + *pr.Username
+			}
+			sb.WriteString(fmt.Sprintf("   • %s\n", html.EscapeString(name)))
+		}
+		if len(s.Proposers) > 3 {
+			sb.WriteString(fmt.Sprintf("   <i>...и ещё %d</i>\n", len(s.Proposers)-3))
+		}
+		sb.WriteString("\n")
+	}
+	msg := tgbotapi.NewMessage(chatID, sb.String())
+	msg.ParseMode = tgbotapi.ModeHTML
+	_, _ = b.api.Send(msg)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -525,11 +556,6 @@ func (b *Bot) reply(chatID int64, text string) {
 	}
 }
 
-// replyStreamer sends a message to the streamer with the streamer keyboard.
-func (b *Bot) replyStreamer(chatID int64, text string) {
-	b.reply(chatID, text)
-}
-
 func (b *Bot) sendWelcome(chatID int64) {
 	b.reply(chatID, welcomeText)
 }
@@ -541,14 +567,11 @@ func (b *Bot) editStreamerMsg(orig *tgbotapi.Message, p *models.Proposal, note s
 	text := buildStreamerMessage(p) + "\n\n<i>" + html.EscapeString(note) + "</i>"
 	edit := tgbotapi.NewEditMessageText(orig.Chat.ID, orig.MessageID, text)
 	edit.ParseMode = tgbotapi.ModeHTML
-	edit.ReplyMarkup = func() *tgbotapi.InlineKeyboardMarkup {
-		kb := proposalInlineKeyboard(p.ID)
-		return &kb
-	}()
+	kb := proposalInlineKeyboard(p.ID, p.UserID)
+	edit.ReplyMarkup = &kb
 	_, _ = b.api.Send(edit)
 }
 
-// extractContent pulls text from a message (direct text or forwarded).
 func extractContent(msg *tgbotapi.Message) string {
 	if msg.Text != "" {
 		return msg.Text
@@ -559,7 +582,24 @@ func extractContent(msg *tgbotapi.Message) string {
 	return ""
 }
 
-func countOrZero[T any](s []T) int { return len(s) }
+func paginationKeyboard(prefix string, offset int, hasMore bool) *tgbotapi.InlineKeyboardMarkup {
+	var nav []tgbotapi.InlineKeyboardButton
+	if offset > 0 {
+		prev := offset - pageSize
+		if prev < 0 {
+			prev = 0
+		}
+		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("◀️ Назад", fmt.Sprintf("%s:%d", prefix, prev)))
+	}
+	if hasMore {
+		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData("▶️ Дальше", fmt.Sprintf("%s:%d", prefix, offset+pageSize)))
+	}
+	if len(nav) == 0 {
+		return nil
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(nav...))
+	return &kb
+}
 
 // ─── Message templates ────────────────────────────────────────────────────────
 
@@ -567,20 +607,24 @@ const welcomeText = `👋 <b>Привет!</b>
 
 Я помогаю передавать предложения стримеру.
 
-Нажми кнопку ниже, чтобы выбрать тип предложения:`
+📌 <b>Правила:</b>
+• Пиши название игры <b>так, как оно звучит в оригинале</b> (например: <i>Elden Ring</i>, <i>The Witcher 3</i>)
+• Не отправляй бессмысленные сообщения и спам
+• За спам или нарушение правил последует <b>временная блокировка</b>
+
+Нажми кнопку ниже, чтобы выбрать тип предложения 👇`
 
 const streamerHelp = `<b>Команды стримера:</b>
 
-/archive — просмотр архива
+/archive — архив предложений
 /top — топ предложений
-/stats — статистика
+/stats — общая статистика
+/gamestats — статистика запрошенных игр
 /help — эта справка`
 
 func buildStreamerMessage(p *models.Proposal) string {
 	var sb strings.Builder
 	sb.WriteString(p.TypeTag() + " ")
-
-	// Author line
 	if p.Type == models.TypeAnon {
 		sb.WriteString("• <b>Анонимно</b>\n\n")
 	} else {
@@ -592,35 +636,29 @@ func buildStreamerMessage(p *models.Proposal) string {
 			sb.WriteString("• " + name + "\n\n")
 		}
 	}
-
 	sb.WriteString(html.EscapeString(p.Content))
 	return sb.String()
 }
 
 func buildChannelMessage(p *models.Proposal) string {
-	var sb strings.Builder
-	sb.WriteString(p.TypeTag() + "\n\n")
-	sb.WriteString(html.EscapeString(p.Content))
-	return sb.String()
+	return p.TypeTag() + "\n\n" + html.EscapeString(p.Content)
 }
 
 func buildInfoMessage(p *models.Proposal, totalCount int) string {
 	var sb strings.Builder
 	sb.WriteString(p.TypeTag() + "\n")
-
 	if p.UserID != nil {
 		link := p.ProfileLink()
 		if link != "" {
-			sb.WriteString(fmt.Sprintf("👤 %s\n", link))
+			sb.WriteString("👤 " + link + "\n")
 		} else {
 			sb.WriteString(fmt.Sprintf("👤 ID: %d\n", *p.UserID))
 		}
 	} else {
 		sb.WriteString("👤 Анонимно\n")
 	}
-
-	sb.WriteString(fmt.Sprintf("🕐 %s\n", p.CreatedAt.In(time.UTC).Format("02.01.2006 15:04 UTC")))
-	sb.WriteString(fmt.Sprintf("🔢 Предложение #%d из %d\n", p.ID, totalCount))
+	sb.WriteString(fmt.Sprintf("🕐 %s\n", p.CreatedAt.UTC().Format("02.01.2006 15:04 UTC")))
+	sb.WriteString(fmt.Sprintf("🔢 #%d из %d\n", p.ID, totalCount))
 	sb.WriteString(fmt.Sprintf("👍 %d  👎 %d", p.Likes, p.Dislikes))
 	return sb.String()
 }
@@ -631,18 +669,15 @@ func buildListMessage(title string, proposals []*models.Proposal, offset int) st
 	for i, p := range proposals {
 		preview := []rune(p.Content)
 		if len(preview) > 80 {
-			preview = append(preview[:80], []rune("\u2026")...)
+			preview = append(preview[:80], '…')
 		}
 		score := ""
 		if p.Likes > 0 || p.Dislikes > 0 {
-			score = fmt.Sprintf(" \U0001F44D%d \U0001F44E%d", p.Likes, p.Dislikes)
+			score = fmt.Sprintf(" 👍%d 👎%d", p.Likes, p.Dislikes)
 		}
-		sb.WriteString(fmt.Sprintf(
-			"%d. %s <b>%s</b>%s\n%s\n\n",
-			offset+i+1,
-			p.TypeTag(),
-			html.EscapeString(p.DisplayName()),
-			score,
+		sb.WriteString(fmt.Sprintf("%d. %s <b>%s</b>%s\n%s\n\n",
+			offset+i+1, p.TypeTag(),
+			html.EscapeString(p.DisplayName()), score,
 			html.EscapeString(string(preview)),
 		))
 	}
