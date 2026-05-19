@@ -16,11 +16,6 @@ func mainReplyKeyboard() tgbotapi.ReplyKeyboardMarkup {
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("🕵️ Анонимно"),
 		),
-		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("📺 Канал стримера"),
-			tgbotapi.NewKeyboardButton("🟣 Твитч стримера"),
-			tgbotapi.NewKeyboardButton("👤 Администратор"),
-		),
 	)
 	kb.ResizeKeyboard = true
 	return kb
