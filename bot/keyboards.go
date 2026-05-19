@@ -16,9 +16,27 @@ func mainReplyKeyboard() tgbotapi.ReplyKeyboardMarkup {
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("🕵️ Анонимно"),
 		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📺 Канал стримера"),
+			tgbotapi.NewKeyboardButton("🟣 Твитч стримера"),
+			tgbotapi.NewKeyboardButton("👤 Администратор"),
+		),
 	)
 	kb.ResizeKeyboard = true
 	return kb
+}
+
+// userInlineLinks returns inline buttons with external links shown after welcome.
+func userInlineLinks() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("📺 Канал стримера", "https://t.me/hoststreet"),
+			tgbotapi.NewInlineKeyboardButtonURL("🟣 Твитч", "https://www.twitch.tv/honesty113"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("👤 Администратор", "tg://user?id=1037388537"),
+		),
+	)
 }
 
 // streamerReplyKeyboard shown to the streamer.
