@@ -68,11 +68,6 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// /start command
 	if msg.IsCommand() && msg.Command() == "start" {
 		globalState.clear(userID)
-		// Step 1: set reply keyboard permanently
-		setKb := tgbotapi.NewMessage(msg.Chat.ID, "👋 Добро пожаловать!")
-		setKb.ReplyMarkup = mainReplyKeyboard()
-		_, _ = b.api.Send(setKb)
-		// Step 2: send rules + inline link buttons
 		b.sendWelcome(msg.Chat.ID)
 		return
 	}
@@ -554,9 +549,10 @@ func (b *Bot) sendGameStats(ctx context.Context, chatID int64) {
 func (b *Bot) reply(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
-	// Only attach reply keyboard for streamer — for users it is set once at /start
 	if chatID == b.streamerChatID {
 		msg.ReplyMarkup = streamerReplyKeyboard()
+	} else {
+		msg.ReplyMarkup = mainReplyKeyboard()
 	}
 	if _, err := b.api.Send(msg); err != nil {
 		log.Printf("WARN reply chatID=%d: %v", chatID, err)
@@ -564,18 +560,26 @@ func (b *Bot) reply(chatID int64, text string) {
 }
 
 func (b *Bot) sendWelcome(chatID int64) {
+	// Welcome message with rules + inline link buttons + sets reply keyboard
 	msg := tgbotapi.NewMessage(chatID, welcomeText)
 	msg.ParseMode = tgbotapi.ModeHTML
-	msg.ReplyMarkup = userInlineLinks()
+	// Use combined markup: reply keyboard is set separately right after
+	msg.ReplyMarkup = mainReplyKeyboard()
 	_, _ = b.api.Send(msg)
+
+	// Follow up with inline link buttons as a second message
+	links := tgbotapi.NewMessage(chatID, "🔗 Ссылки стримера:")
+	links.ParseMode = tgbotapi.ModeHTML
+	links.ReplyMarkup = userInlineLinks()
+	_, _ = b.api.Send(links)
 }
 
-// sendLinksOnly re-sends rules + inline links without touching the reply keyboard.
+// sendLinksOnly re-sends inline links when user taps a link button.
 func (b *Bot) sendLinksOnly(chatID int64) {
-	msg := tgbotapi.NewMessage(chatID, welcomeText)
-	msg.ParseMode = tgbotapi.ModeHTML
-	msg.ReplyMarkup = userInlineLinks()
-	_, _ = b.api.Send(msg)
+	links := tgbotapi.NewMessage(chatID, "🔗 Ссылки стримера:")
+	links.ParseMode = tgbotapi.ModeHTML
+	links.ReplyMarkup = userInlineLinks()
+	_, _ = b.api.Send(links)
 }
 
 func (b *Bot) editStreamerMsg(orig *tgbotapi.Message, p *models.Proposal, note string) {
