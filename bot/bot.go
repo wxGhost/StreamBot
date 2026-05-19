@@ -74,9 +74,6 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 	// Menu buttons
 	switch msg.Text {
-	case "📺 Канал стримера", "🟣 Твитч стримера", "👤 Администратор":
-		b.sendLinksOnly(msg.Chat.ID)
-		return
 	case "🎮 Предложить игру":
 		globalState.set(userID, stateGame)
 		b.reply(msg.Chat.ID, "🎮 <b>Предложи игру!</b>\n\nНапиши название игры так, как оно звучит в оригинале. Например: <i>Elden Ring</i>, <i>Cyberpunk 2077</i>.")
