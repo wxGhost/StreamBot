@@ -74,11 +74,6 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 	// Menu buttons
 	switch msg.Text {
-	case "📺 Канал стримера", "🟣 Твитч стримера", "👤 Администратор":
-		linkMsg := tgbotapi.NewMessage(msg.Chat.ID, "Выбери нужную ссылку 👇")
-		linkMsg.ReplyMarkup = userInlineLinks()
-		_, _ = b.api.Send(linkMsg)
-		return
 	case "🎮 Предложить игру":
 		globalState.set(userID, stateGame)
 		b.reply(msg.Chat.ID, "🎮 <b>Предложи игру!</b>\n\nНапиши название игры так, как оно звучит в оригинале. Например: <i>Elden Ring</i>, <i>Cyberpunk 2077</i>.")
@@ -562,7 +557,17 @@ func (b *Bot) reply(chatID int64, text string) {
 }
 
 func (b *Bot) sendWelcome(chatID int64) {
-	b.reply(chatID, welcomeText)
+	msg := tgbotapi.NewMessage(chatID, welcomeText)
+	msg.ParseMode = tgbotapi.ModeHTML
+	// Reply keyboard for proposals + inline links in the same message
+	msg.ReplyMarkup = mainReplyKeyboard()
+	_, _ = b.api.Send(msg)
+
+	// Inline links as a clean separate pinned-style message
+	links := tgbotapi.NewMessage(chatID, "🔗 Полезные ссылки:")
+	links.ParseMode = tgbotapi.ModeHTML
+	links.ReplyMarkup = userInlineLinks()
+	_, _ = b.api.Send(links)
 }
 
 func (b *Bot) editStreamerMsg(orig *tgbotapi.Message, p *models.Proposal, note string) {
