@@ -68,6 +68,11 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// /start command
 	if msg.IsCommand() && msg.Command() == "start" {
 		globalState.clear(userID)
+		// Step 1: set reply keyboard permanently
+		setKb := tgbotapi.NewMessage(msg.Chat.ID, "👋 Добро пожаловать!")
+		setKb.ReplyMarkup = mainReplyKeyboard()
+		_, _ = b.api.Send(setKb)
+		// Step 2: send rules + inline link buttons
 		b.sendWelcome(msg.Chat.ID)
 		return
 	}
@@ -75,7 +80,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// Menu buttons
 	switch msg.Text {
 	case "📺 Канал стримера", "🟣 Твитч стримера", "👤 Администратор":
-		b.sendWelcome(msg.Chat.ID)
+		b.sendLinksOnly(msg.Chat.ID)
 		return
 	case "🎮 Предложить игру":
 		globalState.set(userID, stateGame)
@@ -549,10 +554,9 @@ func (b *Bot) sendGameStats(ctx context.Context, chatID int64) {
 func (b *Bot) reply(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
+	// Only attach reply keyboard for streamer — for users it is set once at /start
 	if chatID == b.streamerChatID {
 		msg.ReplyMarkup = streamerReplyKeyboard()
-	} else {
-		msg.ReplyMarkup = mainReplyKeyboard()
 	}
 	if _, err := b.api.Send(msg); err != nil {
 		log.Printf("WARN reply chatID=%d: %v", chatID, err)
@@ -560,17 +564,18 @@ func (b *Bot) reply(chatID int64, text string) {
 }
 
 func (b *Bot) sendWelcome(chatID int64) {
-	// First message: rules + inline link buttons
 	msg := tgbotapi.NewMessage(chatID, welcomeText)
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = userInlineLinks()
 	_, _ = b.api.Send(msg)
+}
 
-	// Second message: show reply keyboard
-	kb := tgbotapi.NewMessage(chatID, "Выбери действие 👇")
-	kb.ParseMode = tgbotapi.ModeHTML
-	kb.ReplyMarkup = mainReplyKeyboard()
-	_, _ = b.api.Send(kb)
+// sendLinksOnly re-sends rules + inline links without touching the reply keyboard.
+func (b *Bot) sendLinksOnly(chatID int64) {
+	msg := tgbotapi.NewMessage(chatID, welcomeText)
+	msg.ParseMode = tgbotapi.ModeHTML
+	msg.ReplyMarkup = userInlineLinks()
+	_, _ = b.api.Send(msg)
 }
 
 func (b *Bot) editStreamerMsg(orig *tgbotapi.Message, p *models.Proposal, note string) {
