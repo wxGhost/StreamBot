@@ -21,10 +21,11 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
-	cfg.MaxConns = 5
-	cfg.MinConns = 1
-	cfg.MaxConnLifetime = 30 * time.Minute
-	cfg.MaxConnIdleTime = 5 * time.Minute
+	cfg.MaxConns = 3
+	cfg.MinConns = 0
+	cfg.MaxConnLifetime = 5 * time.Minute
+	cfg.MaxConnIdleTime = 30 * time.Second
+	cfg.ConnConfig.ConnectTimeout = 5 * time.Second
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
