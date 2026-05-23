@@ -660,7 +660,7 @@ func buildStreamerMessage(p *models.Proposal) string {
 }
 
 func buildChannelMessage(p *models.Proposal) string {
-	return p.TypeTag() + "\n\n" + html.EscapeString(p.Content)
+	return p.TypeTag() + "\n\n" + html.EscapeString(p.Content) + "\n\n@OffersTg_bot"
 }
 
 func buildInfoMessage(p *models.Proposal, totalCount int) string {
