@@ -160,7 +160,7 @@ func (b *Bot) handlePendingBlock(ctx context.Context, msg *tgbotapi.Message, tar
 		minutes, until.UTC().Format("15:04 02.01")))
 }
 
-// handlePendingEdit publishes proposal to channel with streamer's comment.
+// handlePendingEdit shows a preview of the proposal with comment before publishing.
 func (b *Bot) handlePendingEdit(ctx context.Context, msg *tgbotapi.Message, proposalID int) {
 	comment := strings.TrimSpace(msg.Text)
 	if comment == "" {
@@ -177,18 +177,40 @@ func (b *Bot) handlePendingEdit(ctx context.Context, msg *tgbotapi.Message, prop
 		return
 	}
 
-	// Publish to channel with comment
+	// Show preview with publish/cancel buttons
+	previewText := "<b>👁 Предпросмотр — так будет выглядеть в канале:</b>\n\n" +
+		buildChannelMessageWithComment(p, comment)
+
+	previewMsg := tgbotapi.NewMessage(msg.Chat.ID, previewText)
+	previewMsg.ParseMode = tgbotapi.ModeHTML
+	previewMsg.ReplyMarkup = previewKeyboard(proposalID, comment)
+	_, _ = b.api.Send(previewMsg)
+}
+
+// handlePublishWithComment publishes to channel with the stored comment from callback data.
+func (b *Bot) handlePublishWithComment(ctx context.Context, cb *tgbotapi.CallbackQuery, proposalID int, comment string) {
+	p, err := b.db.GetProposal(ctx, proposalID)
+	if err != nil {
+		log.Printf("ERROR GetProposal pid=%d: %v", proposalID, err)
+		return
+	}
+
 	text := buildChannelMessageWithComment(p, comment)
 	post := tgbotapi.NewMessage(b.channelID, text)
 	post.ParseMode = tgbotapi.ModeHTML
 	post.ReplyMarkup = channelVoteKeyboard(proposalID, 0, 0)
 	if _, err := b.api.Send(post); err != nil {
 		log.Printf("ERROR publish with comment pid=%d: %v", proposalID, err)
-		b.reply(msg.Chat.ID, "❌ Ошибка публикации в канал.")
 		return
 	}
 
-	b.reply(msg.Chat.ID, "✅ Опубликовано с комментарием!")
+	// Edit preview message to show success
+	if cb.Message != nil {
+		edit := tgbotapi.NewEditMessageText(cb.Message.Chat.ID, cb.Message.MessageID,
+			"✅ Опубликовано в канале!")
+		edit.ParseMode = tgbotapi.ModeHTML
+		_, _ = b.api.Send(edit)
+	}
 }
 
 // acceptProposal validates and saves a proposal, then forwards to streamer.
@@ -320,6 +342,30 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	if strings.HasPrefix(cb.Data, "page_") && cb.Message != nil {
 		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		b.handlePageCallback(ctx, cb)
+		return
+	}
+
+	// Preview confirm/cancel callbacks: "confirm_publish:ID:comment" or "cancel_preview:ID"
+	if strings.HasPrefix(cb.Data, "confirm_publish:") {
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+		parts := strings.SplitN(cb.Data, ":", 3)
+		if len(parts) == 3 {
+			id := 0
+			fmt.Sscanf(parts[1], "%d", &id)
+			comment := parts[2]
+			if cb.Message != nil && cb.Message.Chat.ID == b.streamerChatID {
+				b.handlePublishWithComment(ctx, cb, id, comment)
+			}
+		}
+		return
+	}
+	if strings.HasPrefix(cb.Data, "cancel_preview:") {
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+		if cb.Message != nil && cb.Message.Chat.ID == b.streamerChatID {
+			del := tgbotapi.NewDeleteMessage(cb.Message.Chat.ID, cb.Message.MessageID)
+			_, _ = b.api.Request(del)
+			b.reply(b.streamerChatID, "❌ Публикация отменена.")
+		}
 		return
 	}
 

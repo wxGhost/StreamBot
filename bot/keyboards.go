@@ -93,3 +93,26 @@ func channelVoteKeyboard(proposalID, likes, dislikes int) tgbotapi.InlineKeyboar
 		),
 	)
 }
+
+// previewKeyboard shown under the channel preview message.
+// Comment is embedded in callback data (max ~60 chars safe for Telegram's 64-byte limit).
+func previewKeyboard(proposalID int, comment string) tgbotapi.InlineKeyboardMarkup {
+	// Telegram callback data limit is 64 bytes — truncate comment if needed
+	commentRunes := []rune(comment)
+	if len(commentRunes) > 40 {
+		commentRunes = commentRunes[:40]
+		comment = string(commentRunes)
+	}
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				"✅ Опубликовать",
+				fmt.Sprintf("confirm_publish:%d:%s", proposalID, comment),
+			),
+			tgbotapi.NewInlineKeyboardButtonData(
+				"❌ Отмена",
+				fmt.Sprintf("cancel_preview:%d", proposalID),
+			),
+		),
+	)
+}
