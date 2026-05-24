@@ -99,11 +99,17 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 // handleStreamerMessage handles messages from the streamer.
 func (b *Bot) handleStreamerMessage(ctx context.Context, msg *tgbotapi.Message) {
-	// Check if streamer has a pending action (e.g. waiting for block duration)
+	// Check if streamer has a pending action
 	action, targetUserID, err := b.db.GetPending(ctx, b.streamerChatID)
-	if err == nil && action == "block" && targetUserID != 0 {
-		b.handlePendingBlock(ctx, msg, targetUserID)
-		return
+	if err == nil && targetUserID != 0 {
+		switch action {
+		case "block":
+			b.handlePendingBlock(ctx, msg, targetUserID)
+			return
+		case "edit":
+			b.handlePendingEdit(ctx, msg, int(targetUserID))
+			return
+		}
 	}
 
 	if msg.IsCommand() {
@@ -152,6 +158,37 @@ func (b *Bot) handlePendingBlock(ctx context.Context, msg *tgbotapi.Message, tar
 	_ = b.db.ClearPending(ctx, b.streamerChatID)
 	b.reply(msg.Chat.ID, fmt.Sprintf("🚫 Пользователь заблокирован на <b>%d мин.</b> (до %s UTC).",
 		minutes, until.UTC().Format("15:04 02.01")))
+}
+
+// handlePendingEdit publishes proposal to channel with streamer's comment.
+func (b *Bot) handlePendingEdit(ctx context.Context, msg *tgbotapi.Message, proposalID int) {
+	comment := strings.TrimSpace(msg.Text)
+	if comment == "" {
+		b.reply(msg.Chat.ID, "⚠️ Комментарий не может быть пустым. Напиши текст:")
+		return
+	}
+
+	_ = b.db.ClearPending(ctx, b.streamerChatID)
+
+	p, err := b.db.GetProposal(ctx, proposalID)
+	if err != nil {
+		log.Printf("ERROR GetProposal pid=%d: %v", proposalID, err)
+		b.reply(msg.Chat.ID, "❌ Ошибка получения предложения.")
+		return
+	}
+
+	// Publish to channel with comment
+	text := buildChannelMessageWithComment(p, comment)
+	post := tgbotapi.NewMessage(b.channelID, text)
+	post.ParseMode = tgbotapi.ModeHTML
+	post.ReplyMarkup = channelVoteKeyboard(proposalID, 0, 0)
+	if _, err := b.api.Send(post); err != nil {
+		log.Printf("ERROR publish with comment pid=%d: %v", proposalID, err)
+		b.reply(msg.Chat.ID, "❌ Ошибка публикации в канал.")
+		return
+	}
+
+	b.reply(msg.Chat.ID, "✅ Опубликовано с комментарием!")
 }
 
 // acceptProposal validates and saves a proposal, then forwards to streamer.
@@ -314,6 +351,8 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	switch action {
 	case "publish":
 		b.handlePublish(ctx, cb, proposalID)
+	case "edit":
+		b.handleEditInit(ctx, cb, proposalID)
 	case "top":
 		b.handleSetStatus(ctx, cb, proposalID, models.StatusTop, "⭐ Добавлено в топ!")
 	case "archive":
@@ -397,6 +436,15 @@ func (b *Bot) handleInfo(ctx context.Context, cb *tgbotapi.CallbackQuery, propos
 		text = string(runes[:197]) + "..."
 	}
 	_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, text))
+}
+
+// handleEditInit starts the edit flow: save pending state and ask streamer for comment.
+func (b *Bot) handleEditInit(ctx context.Context, cb *tgbotapi.CallbackQuery, proposalID int) {
+	if err := b.db.SetPending(ctx, b.streamerChatID, "edit", int64(proposalID)); err != nil {
+		log.Printf("ERROR SetPending edit: %v", err)
+		return
+	}
+	b.reply(b.streamerChatID, "✏️ Напиши комментарий к предложению — он появится в канале под текстом предложения:")
 }
 
 // handleBlockInit starts the block flow: save pending state and ask streamer for duration.
@@ -661,6 +709,13 @@ func buildStreamerMessage(p *models.Proposal) string {
 
 func buildChannelMessage(p *models.Proposal) string {
 	return p.TypeTag() + "\n\n" + html.EscapeString(p.Content) + "\n\nПредложения на стрим писать сюда: @OffersTg_bot"
+}
+
+func buildChannelMessageWithComment(p *models.Proposal, comment string) string {
+	return p.TypeTag() + "\n\n" +
+		html.EscapeString(p.Content) + "\n\n" +
+		"<b>Сообщение от Honesty113:</b> " + html.EscapeString(comment) + "\n\n" +
+		"Предложения на стрим писать сюда: @OffersTg_bot"
 }
 
 func buildInfoMessage(p *models.Proposal, totalCount int) string {
