@@ -792,7 +792,7 @@ func buildChannelMessage(p *models.Proposal) string {
 func buildChannelMessageWithComment(p *models.Proposal, comment string) string {
 	return p.TypeTag() + "\n\n" +
 		html.EscapeString(p.Content) + "\n\n" +
-		"<b>Сообщение от Honesty113:</b> " + html.EscapeString(comment) + "\n\n" +
+		"<b>‼️Сообщение от Honesty113:</b> " + html.EscapeString(comment) + "\n\n" +
 		"Предложения на стрим писать сюда: @OffersTg_bot"
 }
 
