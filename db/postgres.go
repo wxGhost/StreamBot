@@ -7,10 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"streamer-bot/models"
-
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"streamer-bot/models"
 )
 
 type DB struct {
@@ -258,22 +257,22 @@ func (d *DB) GetTopGameStacks(ctx context.Context, limit int) ([]*GameStack, err
 
 // ─── Streamer pending ─────────────────────────────────────────────────────────
 
-func (d *DB) SetPending(ctx context.Context, streamerID int64, action string, targetUserID int64) error {
+func (d *DB) SetPending(ctx context.Context, streamerID int64, action string, targetUserID int64, extra string) error {
 	_, err := d.pool.Exec(ctx,
-		`INSERT INTO streamer_pending(streamer_id,action,target_user_id)
-		 VALUES($1,$2,$3)
+		`INSERT INTO streamer_pending(streamer_id,action,target_user_id,extra)
+		 VALUES($1,$2,$3,$4)
 		 ON CONFLICT(streamer_id) DO UPDATE SET action=EXCLUDED.action,
-		 	target_user_id=EXCLUDED.target_user_id, created_at=NOW()`,
-		streamerID, action, targetUserID)
+		 	target_user_id=EXCLUDED.target_user_id, extra=EXCLUDED.extra, created_at=NOW()`,
+		streamerID, action, targetUserID, extra)
 	return err
 }
 
-func (d *DB) GetPending(ctx context.Context, streamerID int64) (action string, targetUserID int64, err error) {
+func (d *DB) GetPending(ctx context.Context, streamerID int64) (action string, targetUserID int64, extra string, err error) {
 	err = d.pool.QueryRow(ctx,
-		`SELECT action,target_user_id FROM streamer_pending WHERE streamer_id=$1`, streamerID,
-	).Scan(&action, &targetUserID)
+		`SELECT action,target_user_id,extra FROM streamer_pending WHERE streamer_id=$1`, streamerID,
+	).Scan(&action, &targetUserID, &extra)
 	if err == pgx.ErrNoRows {
-		return "", 0, nil
+		return "", 0, "", nil
 	}
 	return
 }
