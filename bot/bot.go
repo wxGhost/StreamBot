@@ -100,14 +100,19 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 // handleStreamerMessage handles messages from the streamer.
 func (b *Bot) handleStreamerMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// Check if streamer has a pending action
-	action, targetUserID, err := b.db.GetPending(ctx, b.streamerChatID)
-	if err == nil && targetUserID != 0 {
+	action, targetUserID, extra, err := b.db.GetPending(ctx, b.streamerChatID)
+	log.Printf("INFO streamer pending: action=%q targetUserID=%d extra=%q err=%v", action, targetUserID, extra, err)
+	if err == nil && action != "" && targetUserID != 0 {
 		switch action {
 		case "block":
 			b.handlePendingBlock(ctx, msg, targetUserID)
 			return
 		case "edit":
 			b.handlePendingEdit(ctx, msg, int(targetUserID))
+			return
+		case "edit_comment":
+			// Streamer confirmed comment — stored in extra, proposalID in targetUserID
+			b.handlePendingEditComment(ctx, msg, int(targetUserID), extra)
 			return
 		}
 	}
@@ -160,7 +165,7 @@ func (b *Bot) handlePendingBlock(ctx context.Context, msg *tgbotapi.Message, tar
 		minutes, until.UTC().Format("15:04 02.01")))
 }
 
-// handlePendingEdit shows a preview of the proposal with comment before publishing.
+// handlePendingEdit receives the streamer's comment, saves it, shows preview.
 func (b *Bot) handlePendingEdit(ctx context.Context, msg *tgbotapi.Message, proposalID int) {
 	comment := strings.TrimSpace(msg.Text)
 	if comment == "" {
@@ -168,7 +173,12 @@ func (b *Bot) handlePendingEdit(ctx context.Context, msg *tgbotapi.Message, prop
 		return
 	}
 
-	_ = b.db.ClearPending(ctx, b.streamerChatID)
+	// Save comment in pending extra field, change action to edit_confirm
+	if err := b.db.SetPending(ctx, b.streamerChatID, "edit_confirm", int64(proposalID), comment); err != nil {
+		log.Printf("ERROR SetPending edit_confirm: %v", err)
+		b.reply(msg.Chat.ID, "❌ Ошибка. Попробуй ещё раз.")
+		return
+	}
 
 	p, err := b.db.GetProposal(ctx, proposalID)
 	if err != nil {
@@ -177,18 +187,42 @@ func (b *Bot) handlePendingEdit(ctx context.Context, msg *tgbotapi.Message, prop
 		return
 	}
 
-	// Show preview with publish/cancel buttons
+	// Show preview with simple confirm/cancel buttons (no data in callback)
 	previewText := "<b>👁 Предпросмотр — так будет выглядеть в канале:</b>\n\n" +
 		buildChannelMessageWithComment(p, comment)
 
 	previewMsg := tgbotapi.NewMessage(msg.Chat.ID, previewText)
 	previewMsg.ParseMode = tgbotapi.ModeHTML
-	previewMsg.ReplyMarkup = previewKeyboard(proposalID, comment)
+	previewMsg.ReplyMarkup = previewKeyboard(proposalID)
 	_, _ = b.api.Send(previewMsg)
 }
 
-// handlePublishWithComment publishes to channel with the stored comment from callback data.
-func (b *Bot) handlePublishWithComment(ctx context.Context, cb *tgbotapi.CallbackQuery, proposalID int, comment string) {
+// handlePendingEditComment is called when comment is already saved in DB.
+func (b *Bot) handlePendingEditComment(ctx context.Context, msg *tgbotapi.Message, proposalID int, comment string) {
+	// This handles case where streamer writes something during edit_confirm state
+	// Just re-show the preview
+	p, err := b.db.GetProposal(ctx, proposalID)
+	if err != nil {
+		return
+	}
+	previewText := "<b>👁 Предпросмотр — так будет выглядеть в канале:</b>\n\n" +
+		buildChannelMessageWithComment(p, comment)
+	previewMsg := tgbotapi.NewMessage(msg.Chat.ID, previewText)
+	previewMsg.ParseMode = tgbotapi.ModeHTML
+	previewMsg.ReplyMarkup = previewKeyboard(proposalID)
+	_, _ = b.api.Send(previewMsg)
+}
+
+// handlePublishWithComment reads comment from DB and publishes to channel.
+func (b *Bot) handlePublishWithComment(ctx context.Context, cb *tgbotapi.CallbackQuery, proposalID int) {
+	// Get comment from pending
+	_, _, comment, err := b.db.GetPending(ctx, b.streamerChatID)
+	if err != nil || comment == "" {
+		log.Printf("ERROR GetPending for publish: %v", err)
+		return
+	}
+	_ = b.db.ClearPending(ctx, b.streamerChatID)
+
 	p, err := b.db.GetProposal(ctx, proposalID)
 	if err != nil {
 		log.Printf("ERROR GetProposal pid=%d: %v", proposalID, err)
@@ -204,7 +238,6 @@ func (b *Bot) handlePublishWithComment(ctx context.Context, cb *tgbotapi.Callbac
 		return
 	}
 
-	// Edit preview message to show success
 	if cb.Message != nil {
 		edit := tgbotapi.NewEditMessageText(cb.Message.Chat.ID, cb.Message.MessageID,
 			"✅ Опубликовано в канале!")
@@ -348,13 +381,12 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	// Preview confirm/cancel callbacks: "confirm_publish:ID:comment" or "cancel_preview:ID"
 	if strings.HasPrefix(cb.Data, "confirm_publish:") {
 		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
-		parts := strings.SplitN(cb.Data, ":", 3)
-		if len(parts) == 3 {
+		parts := strings.SplitN(cb.Data, ":", 2)
+		if len(parts) == 2 {
 			id := 0
 			fmt.Sscanf(parts[1], "%d", &id)
-			comment := parts[2]
 			if cb.Message != nil && cb.Message.Chat.ID == b.streamerChatID {
-				b.handlePublishWithComment(ctx, cb, id, comment)
+				b.handlePublishWithComment(ctx, cb, id)
 			}
 		}
 		return
@@ -486,7 +518,7 @@ func (b *Bot) handleInfo(ctx context.Context, cb *tgbotapi.CallbackQuery, propos
 
 // handleEditInit starts the edit flow: save pending state and ask streamer for comment.
 func (b *Bot) handleEditInit(ctx context.Context, cb *tgbotapi.CallbackQuery, proposalID int) {
-	if err := b.db.SetPending(ctx, b.streamerChatID, "edit", int64(proposalID)); err != nil {
+	if err := b.db.SetPending(ctx, b.streamerChatID, "edit", int64(proposalID), ""); err != nil {
 		log.Printf("ERROR SetPending edit: %v", err)
 		return
 	}
@@ -500,7 +532,7 @@ func (b *Bot) handleBlockInit(ctx context.Context, cb *tgbotapi.CallbackQuery, p
 		b.reply(b.streamerChatID, "❌ Нельзя заблокировать анонимного пользователя.")
 		return
 	}
-	if err := b.db.SetPending(ctx, b.streamerChatID, "block", *p.UserID); err != nil {
+	if err := b.db.SetPending(ctx, b.streamerChatID, "block", *p.UserID, ""); err != nil {
 		log.Printf("ERROR SetPending: %v", err)
 		return
 	}
