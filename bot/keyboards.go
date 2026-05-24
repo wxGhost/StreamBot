@@ -56,10 +56,13 @@ func proposalInlineKeyboard(proposalID int, userID *int64) tgbotapi.InlineKeyboa
 	rows := [][]tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("📢 В канал", cbData("publish", proposalID)),
-			tgbotapi.NewInlineKeyboardButtonData("⭐ В топ", cbData("top", proposalID)),
+			tgbotapi.NewInlineKeyboardButtonData("✏️ Изменить", cbData("edit", proposalID)),
 		),
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⭐ В топ", cbData("top", proposalID)),
 			tgbotapi.NewInlineKeyboardButtonData("📦 В архив", cbData("archive", proposalID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🗑 Удалить", cbData("delete", proposalID)),
 		),
 	}
